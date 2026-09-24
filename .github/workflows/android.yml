@@ -1,0 +1,299 @@
+name: PZChessBot Android ARM64 NEON
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - ci
+
+concurrency:
+  group: pzchessbot-android-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NDK_VERSION: "27.2.12479018"
+  ANDROID_API: "24"
+
+jobs:
+  build:
+    name: Android ARM64 NEON
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      # ------------------------------------------------------------
+      # Android SDK / NDK
+      # ------------------------------------------------------------
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: ""
+
+      - name: Install Android NDK
+        run: |
+          sdkmanager --sdk_root="${ANDROID_SDK_ROOT}" \
+            "platform-tools" \
+            "platforms;android-${ANDROID_API}" \
+            "ndk;${NDK_VERSION}"
+
+      # ------------------------------------------------------------
+      # Locate NDK
+      # ------------------------------------------------------------
+      - name: Configure NDK toolchain
+        shell: bash
+        run: |
+          NDK="${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}"
+
+          if [ ! -d "$NDK" ]; then
+            echo "ERROR: NDK not found:"
+            echo "$NDK"
+            exit 1
+          fi
+
+          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+
+          if [ ! -x "$TOOLCHAIN/aarch64-linux-android${ANDROID_API}-clang++" ]; then
+            echo "ERROR: Android ARM64 Clang compiler not found"
+            echo "$TOOLCHAIN/aarch64-linux-android${ANDROID_API}-clang++"
+            exit 1
+          fi
+
+          echo "NDK=$NDK" >> "$GITHUB_ENV"
+          echo "TOOLCHAIN=$TOOLCHAIN" >> "$GITHUB_ENV"
+
+          echo "$TOOLCHAIN" >> "$GITHUB_PATH"
+
+          echo "Using NDK:"
+          "$TOOLCHAIN/clang++" --version
+
+          echo
+          echo "Android ARM64 compiler:"
+          "$TOOLCHAIN/aarch64-linux-android${ANDROID_API}-clang++" \
+            --version
+
+      # ------------------------------------------------------------
+      # Download NNUE
+      # ------------------------------------------------------------
+      - name: Download latest NNUE
+        run: |
+          curl -fL \
+            -o nnue.bin \
+            https://github.com/kevlu8/PZChessBot-Networks/releases/latest/download/nnue.bin
+
+          test -s nnue.bin
+
+          echo "NNUE size:"
+          ls -lh nnue.bin
+
+      # ------------------------------------------------------------
+      # Verify source layout
+      # ------------------------------------------------------------
+      - name: Verify ARM/NEON source
+        shell: bash
+        run: |
+          test -f engine/arch/aarch64.hpp
+          test -f engine/arch/simd/neon.hpp
+          test -f engine/arch/simd/simd.cpp
+
+          echo "ARM architecture files:"
+          ls -lh \
+            engine/arch/aarch64.hpp \
+            engine/arch/simd/neon.hpp \
+            engine/arch/simd/simd.cpp
+
+      # ------------------------------------------------------------
+      # Build
+      #
+      # IMPORTANT:
+      # Do NOT use:
+      #   make arm
+      #
+      # The original Makefile's arm target uses
+      # aarch64-linux-gnu-g++, which targets Linux, not Android.
+      #
+      # Also do NOT use:
+      #   make pgo
+      #
+      # PGO runs the binary on the host and uses -march=native.
+      # ------------------------------------------------------------
+      - name: Compile PZChessBot for Android ARM64 NEON
+        shell: bash
+        run: |
+          set -e
+
+          CXX="${TOOLCHAIN}/aarch64-linux-android${ANDROID_API}-clang++"
+
+          VERSION="android-${GITHUB_SHA::7}"
+
+          echo "Compiler:"
+          echo "$CXX"
+
+          echo
+          echo "Target:"
+          "$CXX" -dumpmachine
+
+          echo
+          echo "Compiling source files..."
+
+          mapfile -t SOURCES < <(
+            find engine -type f -name '*.cpp' -print | sort
+          )
+
+          SOURCES+=("Pyrrhic/tbprobe.cpp")
+
+          echo "Source files:"
+          printf '  %s\n' "${SOURCES[@]}"
+
+          "$CXX" \
+            -std=c++20 \
+            -O3 \
+            -flto=thin \
+            -ffunction-sections \
+            -fdata-sections \
+            -fno-strict-aliasing \
+            -fomit-frame-pointer \
+            -march=armv8-a+simd \
+            -moutline-atomics \
+            -pthread \
+            -DNNUE_PATH=\"nnue.bin\" \
+            -DVERSION=\"${VERSION}\" \
+            -Iengine \
+            -IPyrrhic \
+            "${SOURCES[@]}" \
+            -static-libstdc++ \
+            -Wl,--gc-sections \
+            -Wl,-z,max-page-size=16384 \
+            -o pzchessbot-android-arm64
+
+          echo
+          echo "Build complete."
+
+          ls -lh pzchessbot-android-arm64
+
+      # ------------------------------------------------------------
+      # Verify ELF architecture and Android target
+      # ------------------------------------------------------------
+      - name: Verify ARM64 ELF
+        shell: bash
+        run: |
+          set -e
+
+          file pzchessbot-android-arm64
+
+          readelf -h pzchessbot-android-arm64
+
+          echo
+          echo "Machine:"
+          readelf -h pzchessbot-android-arm64 | grep -E \
+            'Class:|Machine:|Type:'
+
+          echo
+          echo "Dynamic dependencies:"
+          readelf -d pzchessbot-android-arm64 || true
+
+          echo
+          echo "Checking for x86 instructions/symbols..."
+          if readelf -h pzchessbot-android-arm64 | grep -q "Advanced Micro Devices X86-64"; then
+            echo "ERROR: Binary is x86-64!"
+            exit 1
+          fi
+
+          echo
+          echo "Checking architecture-specific compiler macros..."
+
+          cat > /tmp/check_arch.cpp <<'EOF'
+          #if !defined(__aarch64__)
+          #error "__aarch64__ is not defined"
+          #endif
+
+          #if !defined(__ARM_NEON)
+          #error "__ARM_NEON is not defined"
+          #endif
+
+          int main() {
+              return 0;
+          }
+          EOF
+
+          "$TOOLCHAIN/aarch64-linux-android${ANDROID_API}-clang++" \
+            -std=c++20 \
+            -march=armv8-a+simd \
+            /tmp/check_arch.cpp \
+            -o /tmp/check_arch
+
+          file /tmp/check_arch
+
+          echo
+          echo "ARM64 NEON compiler verification passed."
+
+      # ------------------------------------------------------------
+      # Check that the NNUE file is present beside the binary
+      # ------------------------------------------------------------
+      - name: Prepare release package
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p release
+
+          cp pzchessbot-android-arm64 release/
+          cp nnue.bin release/
+
+          cat > release/README.txt <<'EOF'
+          PZChessBot Android ARM64 NEON
+
+          Binary:
+            pzchessbot-android-arm64
+
+          Neural network:
+            nnue.bin
+
+          Architecture:
+            AArch64 / ARM64
+
+          SIMD:
+            ARM NEON
+
+          Android minimum API:
+            24
+
+          The nnue.bin file must remain in the same directory
+          as the engine binary unless the engine is rebuilt with
+          a different NNUE_PATH.
+          EOF
+
+          chmod +x release/pzchessbot-android-arm64
+
+          tar -czf \
+            PZChessBot-Android-ARM64-NEON.tar.gz \
+            -C release \
+            pzchessbot-android-arm64 \
+            nnue.bin \
+            README.txt
+
+          ls -lh \
+            PZChessBot-Android-ARM64-NEON.tar.gz \
+            release/pzchessbot-android-arm64 \
+            release/nnue.bin
+
+      # ------------------------------------------------------------
+      # Upload artifacts
+      # ------------------------------------------------------------
+      - name: Upload Android ARM64 NEON build
+        uses: actions/upload-artifact@v4
+        with:
+          name: PZChessBot-Android-ARM64-NEON
+          path: |
+            PZChessBot-Android-ARM64-NEON.tar.gz
+            release/pzchessbot-android-arm64
+            release/nnue.bin
+          if-no-files-found: error
