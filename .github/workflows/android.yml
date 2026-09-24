@@ -17,33 +17,63 @@ jobs:
         uses: actions/checkout@v4
 
       # ---------------------------------------------------------
-      # Android SDK
+      # Java
+      # ---------------------------------------------------------
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # ---------------------------------------------------------
+      # Android command-line tools
+      #
+      # IMPORTANT:
+      # Do not ask setup-android to install SDK packages.
+      # We install them explicitly with sdkmanager below.
       # ---------------------------------------------------------
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android NDK
-        run: |
-          yes | sdkmanager --licenses >/dev/null || true
-
-          sdkmanager \
-            "platform-tools" \
-            "platforms;android-${ANDROID_API}" \
-            "ndk;${NDK_VERSION}"
+        uses: android-actions/setup-android@v4
+        with:
+          packages: ""
 
       # ---------------------------------------------------------
-      # Configure compiler
+      # Install exactly the SDK/NDK versions we need
       # ---------------------------------------------------------
-      - name: Configure Android NDK
+      - name: Install Android SDK and NDK
         shell: bash
         run: |
           set -e
 
-          NDK="${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}"
-          TOOLCHAIN="${NDK}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
 
-          CXX="${TOOLCHAIN}/aarch64-linux-android${ANDROID_API}-clang++"
+          sdkmanager --version
 
+          echo
+          echo "Installing Android platform and NDK..."
+
+          sdkmanager --sdk_root="$ANDROID_SDK_ROOT" --install \
+            "platform-tools" \
+            "platforms;android-${ANDROID_API}" \
+            "ndk;${NDK_VERSION}"
+
+          echo
+          echo "Installed packages:"
+          sdkmanager --sdk_root="$ANDROID_SDK_ROOT" --list_installed
+
+      # ---------------------------------------------------------
+      # Configure NDK compiler
+      # ---------------------------------------------------------
+      - name: Configure NDK
+        shell: bash
+        run: |
+          set -e
+
+          NDK="$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}"
+          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          CXX="$TOOLCHAIN/aarch64-linux-android${ANDROID_API}-clang++"
+
+          test -d "$NDK"
           test -x "$CXX"
 
           echo "NDK=$NDK" >> "$GITHUB_ENV"
@@ -52,8 +82,9 @@ jobs:
 
           echo "$TOOLCHAIN" >> "$GITHUB_PATH"
 
+          echo
           echo "========================================"
-          echo "Android NDK:"
+          echo "NDK:"
           echo "$NDK"
           echo
           echo "Compiler:"
@@ -81,24 +112,9 @@ jobs:
           ls -lh nnue.bin
 
       # ---------------------------------------------------------
-      # Check ARM source
+      # Verify ARM NEON compiler
       # ---------------------------------------------------------
-      - name: Check ARM NEON source
-        run: |
-          set -e
-
-          test -f engine/arch/arch.hpp
-          test -f engine/arch/aarch64.hpp
-          test -f engine/arch/simd/simd.hpp
-          test -f engine/arch/simd/neon.hpp
-          test -f engine/arch/simd/simd.cpp
-
-          echo "ARM/NEON implementation found."
-
-      # ---------------------------------------------------------
-      # Verify compiler selects ARM NEON
-      # ---------------------------------------------------------
-      - name: Verify ARM NEON compiler macros
+      - name: Verify ARM64 NEON
         shell: bash
         run: |
           set -e
@@ -132,30 +148,39 @@ jobs:
           echo "ARM64 NEON compiler test passed."
 
       # ---------------------------------------------------------
-      # Clean previous objects
+      # Verify PZChessBot ARM source
       # ---------------------------------------------------------
-      - name: Clean
-        run: |
-          rm -f pzchessbot
-
-          find engine -name "*.o" -delete
-          find engine -name "*.d" -delete
-
-      # ---------------------------------------------------------
-      # Compile each source separately
-      #
-      # This is intentional.
-      #
-      # If one source fails, GitHub will show EXACTLY which
-      # source file caused the failure instead of hiding it
-      # inside one giant compiler command.
-      # ---------------------------------------------------------
-      - name: Compile source files
+      - name: Verify PZChessBot ARM source
         shell: bash
         run: |
           set -e
 
+          echo "Checking ARM/NEON files..."
+
+          test -f engine/arch/arch.hpp
+          test -f engine/arch/aarch64.hpp
+          test -f engine/arch/simd/neon.hpp
+          test -f engine/arch/simd/simd.cpp
+
+          echo
+          echo "ARM/NEON source files found."
+
+      # ---------------------------------------------------------
+      # Clean
+      # ---------------------------------------------------------
+      - name: Clean build
+        run: |
+          rm -rf build
+          rm -f pzchessbot
           mkdir -p build
+
+      # ---------------------------------------------------------
+      # Compile
+      # ---------------------------------------------------------
+      - name: Compile PZChessBot
+        shell: bash
+        run: |
+          set -e
 
           SOURCES=(
             engine/arch/arch.cpp
@@ -180,9 +205,7 @@ jobs:
           COMMON_FLAGS=(
             -std=c++20
             -O3
-
             -march=armv8-a+simd
-
             -fomit-frame-pointer
             -ffunction-sections
             -fdata-sections
@@ -217,19 +240,16 @@ jobs:
       # ---------------------------------------------------------
       # Link
       # ---------------------------------------------------------
-      - name: Link Android binary
+      - name: Link
         shell: bash
         run: |
           set -e
-
-          echo "Linking..."
 
           "$CXX" \
             -O3 \
             -march=armv8-a+simd \
             -fomit-frame-pointer \
             -Wl,--gc-sections \
-            -Wl,-z,stack-size=8388608 \
             -static-libstdc++ \
             build/*.o \
             -o pzchessbot
@@ -244,7 +264,7 @@ jobs:
           ls -lh pzchessbot
 
       # ---------------------------------------------------------
-      # ELF verification
+      # Verify ELF
       # ---------------------------------------------------------
       - name: Verify binary
         shell: bash
@@ -260,21 +280,7 @@ jobs:
             "Class:|Data:|Type:|Machine:"
 
           echo
-          echo "DYNAMIC SECTION:"
-          readelf -d pzchessbot || true
-
-          echo
-          echo "NEON instructions:"
-          readelf -A pzchessbot 2>/dev/null || true
-
-          echo
-          echo "Checking architecture..."
-
-          file pzchessbot | grep -Ei \
-            "aarch64|arm64"
-
-          echo
-          echo "Android ARM64 verification passed."
+          echo "Android ARM64 binary verification complete."
 
       # ---------------------------------------------------------
       # Package
@@ -298,8 +304,8 @@ jobs:
           SIMD:
             ARM NEON
 
-          Android API:
-            24+
+          Minimum Android API:
+            24
 
           Files:
             pzchessbot
@@ -314,11 +320,6 @@ jobs:
             pzchessbot \
             nnue.bin \
             README.txt
-
-          ls -lh \
-            PZChessBot-Android-ARM64-NEON.tar.gz \
-            release/pzchessbot \
-            release/nnue.bin
 
       # ---------------------------------------------------------
       # Upload
