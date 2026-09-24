@@ -13,33 +13,32 @@ jobs:
       ANDROID_API: "24"
 
     steps:
+      # =========================================================
+      # SOURCE
+      # =========================================================
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ---------------------------------------------------------
-      # Java
-      # ---------------------------------------------------------
+      # =========================================================
+      # JAVA
+      # =========================================================
       - name: Set up Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
-      # ---------------------------------------------------------
-      # Android command-line tools
-      #
-      # IMPORTANT:
-      # Do not ask setup-android to install SDK packages.
-      # We install them explicitly with sdkmanager below.
-      # ---------------------------------------------------------
+      # =========================================================
+      # ANDROID SDK
+      # =========================================================
       - name: Setup Android SDK
         uses: android-actions/setup-android@v4
         with:
           packages: ""
 
-      # ---------------------------------------------------------
-      # Install exactly the SDK/NDK versions we need
-      # ---------------------------------------------------------
+      # =========================================================
+      # INSTALL ANDROID NDK
+      # =========================================================
       - name: Install Android SDK and NDK
         shell: bash
         run: |
@@ -50,7 +49,7 @@ jobs:
           sdkmanager --version
 
           echo
-          echo "Installing Android platform and NDK..."
+          echo "Installing required Android packages..."
 
           sdkmanager --sdk_root="$ANDROID_SDK_ROOT" --install \
             "platform-tools" \
@@ -61,10 +60,10 @@ jobs:
           echo "Installed packages:"
           sdkmanager --sdk_root="$ANDROID_SDK_ROOT" --list_installed
 
-      # ---------------------------------------------------------
-      # Configure NDK compiler
-      # ---------------------------------------------------------
-      - name: Configure NDK
+      # =========================================================
+      # CONFIGURE NDK TOOLCHAIN
+      # =========================================================
+      - name: Configure Android NDK
         shell: bash
         run: |
           set -e
@@ -73,8 +72,17 @@ jobs:
           TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
           CXX="$TOOLCHAIN/aarch64-linux-android${ANDROID_API}-clang++"
 
-          test -d "$NDK"
-          test -x "$CXX"
+          if [ ! -d "$NDK" ]; then
+            echo "ERROR: NDK directory does not exist:"
+            echo "$NDK"
+            exit 1
+          fi
+
+          if [ ! -x "$CXX" ]; then
+            echo "ERROR: Android ARM64 compiler not found:"
+            echo "$CXX"
+            exit 1
+          fi
 
           echo "NDK=$NDK" >> "$GITHUB_ENV"
           echo "TOOLCHAIN=$TOOLCHAIN" >> "$GITHUB_ENV"
@@ -84,37 +92,83 @@ jobs:
 
           echo
           echo "========================================"
-          echo "NDK:"
-          echo "$NDK"
-          echo
-          echo "Compiler:"
-          "$CXX" --version
-          echo
-          echo "Target:"
-          "$CXX" -dumpmachine
+          echo "ANDROID NDK"
           echo "========================================"
+          echo "$NDK"
 
-      # ---------------------------------------------------------
-      # Download NNUE
-      # ---------------------------------------------------------
+          echo
+          echo "========================================"
+          echo "COMPILER"
+          echo "========================================"
+          "$CXX" --version
+
+          echo
+          echo "========================================"
+          echo "TARGET"
+          echo "========================================"
+          "$CXX" -dumpmachine
+
+      # =========================================================
+      # DOWNLOAD NNUE
+      # =========================================================
       - name: Download NNUE
         shell: bash
         run: |
           set -e
 
+          echo "Downloading NNUE..."
+
           curl -fL \
             "https://github.com/kevlu8/PZChessBot-Networks/releases/latest/download/nnue.bin" \
             -o nnue.bin
 
-          test -s nnue.bin
+          if [ ! -s nnue.bin ]; then
+            echo "ERROR: nnue.bin is missing or empty."
+            exit 1
+          fi
 
-          echo "NNUE:"
+          echo
+          echo "NNUE downloaded:"
           ls -lh nnue.bin
 
-      # ---------------------------------------------------------
-      # Verify ARM NEON compiler
-      # ---------------------------------------------------------
-      - name: Verify ARM64 NEON
+      # =========================================================
+      # CHECK PZCHESSBOT ARM SOURCE
+      # =========================================================
+      - name: Verify PZChessBot ARM source
+        shell: bash
+        run: |
+          set -e
+
+          echo "Checking ARM/NEON source files..."
+
+          test -f engine/arch/arch.hpp
+          test -f engine/arch/aarch64.hpp
+          test -f engine/arch/simd/neon.hpp
+          test -f engine/arch/simd/simd.cpp
+
+          echo
+          echo "ARM/NEON implementation found."
+
+          echo
+          echo "Architecture files:"
+          ls -lh \
+            engine/arch/arch.hpp \
+            engine/arch/aarch64.hpp \
+            engine/arch/simd/neon.hpp \
+            engine/arch/simd/simd.cpp
+
+      # =========================================================
+      # VERIFY ARM64 + NEON COMPILER
+      # =========================================================
+      #
+      # IMPORTANT:
+      # This test intentionally uses vgetq_lane_s32(x, 0).
+      #
+      # vget_low_s32(x) returns int32x2_t and therefore must NOT
+      # be passed to vgetq_lane_s32(), which expects int32x4_t.
+      #
+      # =========================================================
+      - name: Verify ARM64 NEON compiler
         shell: bash
         run: |
           set -e
@@ -133,9 +187,12 @@ jobs:
           int main() {
               int32x4_t x = vdupq_n_s32(1);
               x = vaddq_s32(x, x);
-              return vgetq_lane_s32(vget_low_s32(x), 0) == 2 ? 0 : 1;
+
+              return vgetq_lane_s32(x, 0) == 2 ? 0 : 1;
           }
           EOF
+
+          echo "Compiling ARM64 NEON test..."
 
           "$CXX" \
             -std=c++20 \
@@ -143,40 +200,33 @@ jobs:
             /tmp/arm_test.cpp \
             -o /tmp/arm_test
 
+          echo
+          echo "ARM test binary:"
           file /tmp/arm_test
 
-          echo "ARM64 NEON compiler test passed."
+          echo
+          echo "ARM64 NEON compiler test PASSED."
 
-      # ---------------------------------------------------------
-      # Verify PZChessBot ARM source
-      # ---------------------------------------------------------
-      - name: Verify PZChessBot ARM source
+      # =========================================================
+      # CLEAN
+      # =========================================================
+      - name: Clean build
         shell: bash
         run: |
           set -e
 
-          echo "Checking ARM/NEON files..."
-
-          test -f engine/arch/arch.hpp
-          test -f engine/arch/aarch64.hpp
-          test -f engine/arch/simd/neon.hpp
-          test -f engine/arch/simd/simd.cpp
-
-          echo
-          echo "ARM/NEON source files found."
-
-      # ---------------------------------------------------------
-      # Clean
-      # ---------------------------------------------------------
-      - name: Clean build
-        run: |
           rm -rf build
           rm -f pzchessbot
+
           mkdir -p build
 
-      # ---------------------------------------------------------
-      # Compile
-      # ---------------------------------------------------------
+      # =========================================================
+      # COMPILE PZCHESSBOT
+      #
+      # Each source is compiled separately.
+      #
+      # This makes compiler errors easy to identify.
+      # =========================================================
       - name: Compile PZChessBot
         shell: bash
         run: |
@@ -205,7 +255,10 @@ jobs:
           COMMON_FLAGS=(
             -std=c++20
             -O3
+
+            # ARM64 + standard ARMv8 NEON
             -march=armv8-a+simd
+
             -fomit-frame-pointer
             -ffunction-sections
             -fdata-sections
@@ -220,14 +273,20 @@ jobs:
             -MP
           )
 
+          echo
+          echo "========================================"
+          echo "PZCHESSBOT COMPILATION"
+          echo "========================================"
+
           for SRC in "${SOURCES[@]}"; do
+
             OBJ="build/$(echo "$SRC" | sed 's#/#_#g; s#\.cpp$#.o#')"
 
             echo
-            echo "========================================"
+            echo "----------------------------------------"
             echo "COMPILING:"
             echo "$SRC"
-            echo "========================================"
+            echo "----------------------------------------"
 
             "$CXX" \
               "${COMMON_FLAGS[@]}" \
@@ -235,15 +294,27 @@ jobs:
               -o "$OBJ"
 
             echo "OK: $SRC"
+
           done
 
-      # ---------------------------------------------------------
-      # Link
-      # ---------------------------------------------------------
-      - name: Link
+          echo
+          echo "========================================"
+          echo "ALL SOURCE FILES COMPILED"
+          echo "========================================"
+
+          echo
+          echo "Object files:"
+          ls -lh build/
+
+      # =========================================================
+      # LINK
+      # =========================================================
+      - name: Link Android ARM64 binary
         shell: bash
         run: |
           set -e
+
+          echo "Linking PZChessBot..."
 
           "$CXX" \
             -O3 \
@@ -258,34 +329,51 @@ jobs:
 
           echo
           echo "========================================"
-          echo "BUILD SUCCESSFUL"
+          echo "LINK SUCCESSFUL"
           echo "========================================"
 
           ls -lh pzchessbot
 
-      # ---------------------------------------------------------
-      # Verify ELF
-      # ---------------------------------------------------------
-      - name: Verify binary
+      # =========================================================
+      # VERIFY ELF
+      # =========================================================
+      - name: Verify Android ARM64 binary
         shell: bash
         run: |
           set -e
 
-          echo "FILE:"
+          echo
+          echo "========================================"
+          echo "FILE"
+          echo "========================================"
+
           file pzchessbot
 
           echo
-          echo "ELF HEADER:"
+          echo "========================================"
+          echo "ELF HEADER"
+          echo "========================================"
+
           readelf -h pzchessbot | grep -E \
             "Class:|Data:|Type:|Machine:"
 
           echo
-          echo "Android ARM64 binary verification complete."
+          echo "========================================"
+          echo "ARCHITECTURE CHECK"
+          echo "========================================"
 
-      # ---------------------------------------------------------
-      # Package
-      # ---------------------------------------------------------
-      - name: Package
+          if ! file pzchessbot | grep -Eiq "aarch64|arm64"; then
+            echo "ERROR: Binary is not ARM64."
+            exit 1
+          fi
+
+          echo
+          echo "ARM64 ELF verification PASSED."
+
+      # =========================================================
+      # PACKAGE
+      # =========================================================
+      - name: Package Android engine
         shell: bash
         run: |
           set -e
@@ -304,15 +392,25 @@ jobs:
           SIMD:
             ARM NEON
 
-          Minimum Android API:
+          Android minimum API:
             24
 
           Files:
             pzchessbot
             nnue.bin
 
-          Keep nnue.bin beside the executable.
+          IMPORTANT:
+            Keep nnue.bin in the same directory as
+            the pzchessbot executable.
+
+          Build:
+            Android NDK 27.2.12479018
+
+          Target:
+            armv8-a + NEON
           EOF
+
+          chmod +x release/pzchessbot
 
           tar -czf \
             PZChessBot-Android-ARM64-NEON.tar.gz \
@@ -321,10 +419,20 @@ jobs:
             nnue.bin \
             README.txt
 
-      # ---------------------------------------------------------
-      # Upload
-      # ---------------------------------------------------------
-      - name: Upload artifact
+          echo
+          echo "========================================"
+          echo "PACKAGE CREATED"
+          echo "========================================"
+
+          ls -lh \
+            PZChessBot-Android-ARM64-NEON.tar.gz \
+            release/pzchessbot \
+            release/nnue.bin
+
+      # =========================================================
+      # UPLOAD
+      # =========================================================
+      - name: Upload Android ARM64 NEON build
         uses: actions/upload-artifact@v4
         with:
           name: PZChessBot-Android-ARM64-NEON
