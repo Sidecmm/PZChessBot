@@ -18,9 +18,16 @@
 
 #include "eval.hpp"
 
+#ifdef __linux__
+alignas(2 * 1024 * 1024) Network nnue_network;
+#else
 Network nnue_network;
+#endif
 
 __attribute__((constructor(102))) void init_network() {
+#ifdef __linux__
+	madvise(&nnue_network, sizeof(nnue_network), MADV_HUGEPAGE);
+#endif
 	nnue_network.load();
 }
 
@@ -51,7 +58,11 @@ Value eval(Position &pos, AccumulatorManager &am) {
 						  BishopValue * arch::popcnt(pos.piece_boards[BISHOP]) + RookValue * arch::popcnt(pos.piece_boards[ROOK]) +
 						  QueenValue * arch::popcnt(pos.piece_boards[QUEEN]);
 
-	return (int64_t)score * (26500 + mat_phase) * (200 - pos.halfmove) / 200 / 32768;
+	return (int64_t)score * (26500 + mat_phase) / 32768;
+}
+
+Value adjust_eval_50mr(Position &pos, Value eval) {
+	return (int64_t)eval * (200 - pos.halfmove) / 200;
 }
 
 std::array<Value, 8> debug_eval(Position &pos) {
