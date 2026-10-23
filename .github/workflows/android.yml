@@ -438,7 +438,5 @@ jobs:
           name: PZChessBot-Android-ARM64-NEON
           path: |
             PZChessBot-Android-ARM64-NEON.tar.gz
-            release/pzchessbot
-            release/nnue.bin
             build/logs/*.log
           if-no-files-found: error
